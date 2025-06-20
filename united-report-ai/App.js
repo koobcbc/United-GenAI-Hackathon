@@ -16,6 +16,7 @@ function TabNavigator() {
   return (
     <Tab.Navigator
       screenOptions={({ route }) => ({
+        headerShown: false,
         tabBarIcon: ({ focused, color, size }) => {
           let iconName;
 
@@ -41,18 +42,18 @@ export default function App() {
   return (
     <NavigationContainer>
       <StatusBar style="auto" />
-      <Stack.Navigator>
+      <Stack.Navigator
+        screenOptions={{
+          headerShown: false,
+        }}
+      >
         <Stack.Screen 
           name="Main" 
           component={TabNavigator} 
-          options={{ headerShown: false }}
         />
         <Stack.Screen 
           name="Chat" 
           component={ChatScreen}
-          options={{ 
-            headerShown: false,
-          }}
         />
       </Stack.Navigator>
     </NavigationContainer>
