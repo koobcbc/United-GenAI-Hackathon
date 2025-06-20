@@ -13,7 +13,11 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "This app needs access to your photo library to allow you to upload images for your report.",
+        "NSCameraUsageDescription": "This app needs access to your camera to allow you to take photos for your report."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -24,6 +28,15 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "The app needs access to your photos to let you include them in your report.",
+          "cameraPermission": "The app needs access to your camera to let you take photos for your report."
+        }
+      ]
+    ]
   }
 }

@@ -11,6 +11,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   SafeAreaView,
+  Linking,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -82,7 +83,14 @@ const ChatScreen = ({ navigation }) => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please grant permission to access your photo library.');
+      Alert.alert(
+        'Permission needed',
+        'Please grant permission to access your photo library to upload images.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => Linking.openSettings() },
+        ]
+      );
       return;
     }
 
@@ -129,7 +137,14 @@ const ChatScreen = ({ navigation }) => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     
     if (status !== 'granted') {
-      Alert.alert('Permission needed', 'Please grant permission to access your camera.');
+      Alert.alert(
+        'Permission needed',
+        'Please grant permission to access your camera to take photos.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => Linking.openSettings() },
+        ]
+      );
       return;
     }
 
@@ -197,6 +212,12 @@ const ChatScreen = ({ navigation }) => {
 
   return (
     <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color="#007AFF" />
+        </TouchableOpacity>
+        <Text style={styles.headerTitle}>New Report</Text>
+      </View>
       <KeyboardAvoidingView 
         style={styles.container} 
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -274,6 +295,24 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#f5f5f5',
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 15,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+    backgroundColor: '#fff',
+  },
+  backButton: {
+    padding: 5,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+    marginLeft: 15,
   },
   reportTypeContainer: {
     backgroundColor: '#fff',
