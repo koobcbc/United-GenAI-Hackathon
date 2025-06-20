@@ -7,8 +7,11 @@ import {
   TouchableOpacity,
   TextInput,
   SafeAreaView,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
 
 const ReportsScreen = ({ navigation }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -66,6 +69,66 @@ const ReportsScreen = ({ navigation }) => {
       agent: 'AI Agent #2',
     },
   ];
+
+  const generatePdf = async (report) => {
+    const htmlContent = `
+      <html>
+        <head>
+          <style>
+            body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; }
+            h1 { color: #007AFF; border-bottom: 2px solid #007AFF; padding-bottom: 10px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            .label { font-weight: bold; color: #555; }
+          </style>
+        </head>
+        <body>
+          <h1>United Airlines Report</h1>
+          <h2>Report ID: ${report.id}</h2>
+          
+          <table>
+            <tr>
+              <td class="label">Title</td>
+              <td>${report.title}</td>
+            </tr>
+            <tr>
+              <td class="label">Date</td>
+              <td>${report.date}</td>
+            </tr>
+            <tr>
+              <td class="label">Status</td>
+              <td>${report.status}</td>
+            </tr>
+             <tr>
+              <td class="label">Priority</td>
+              <td>${report.priority}</td>
+            </tr>
+            <tr>
+              <td class="label">Report Type</td>
+              <td>${report.type}</td>
+            </tr>
+             <tr>
+              <td class="label">Assigned Agent</td>
+              <td>${report.agent}</td>
+            </tr>
+            <tr>
+              <td class="label">Description</td>
+              <td>${report.description}</td>
+            </tr>
+          </table>
+        </body>
+      </html>
+    `;
+
+    try {
+      const { uri } = await Print.printToFileAsync({ html: htmlContent });
+      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Download Report PDF' });
+    } catch (error) {
+      console.error('Failed to generate or share PDF:', error);
+      Alert.alert('Error', 'Could not generate or share the PDF.');
+    }
+  };
 
   const filters = ['All', 'Completed', 'In Progress', 'Pending'];
 
@@ -149,6 +212,10 @@ const ReportsScreen = ({ navigation }) => {
         <TouchableOpacity style={styles.viewButton}>
           <Text style={styles.viewButtonText}>View Details</Text>
           <Ionicons name="chevron-forward" size={16} color="#007AFF" />
+        </TouchableOpacity>
+        <TouchableOpacity style={styles.downloadButton} onPress={() => generatePdf(item)}>
+          <Ionicons name="download-outline" size={18} color="#007AFF" />
+          <Text style={styles.downloadButtonText}>Download PDF</Text>
         </TouchableOpacity>
       </View>
     </TouchableOpacity>
@@ -387,6 +454,8 @@ const styles = StyleSheet.create({
   reportDate: {
     fontSize: 12,
     color: '#999',
+    fontWeight: '500',
+    marginRight: 4,
   },
   viewButton: {
     flexDirection: 'row',
@@ -397,6 +466,20 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
     marginRight: 4,
+  },
+  downloadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#eaf5ff',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 15,
+  },
+  downloadButtonText: {
+    color: '#007AFF',
+    fontSize: 12,
+    fontWeight: '500',
+    marginLeft: 5,
   },
 });
 
