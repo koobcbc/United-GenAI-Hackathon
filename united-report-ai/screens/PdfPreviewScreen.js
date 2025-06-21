@@ -119,10 +119,6 @@ const PdfPreviewScreen = ({ route, navigation }) => {
               <td class="label">Report Type</td>
               <td>${report.type}</td>
             </tr>
-             <tr>
-              <td class="label">Assigned Agent</td>
-              <td>${report.agent}</td>
-            </tr>
             <tr>
               <td class="label">Description</td>
               <td>${report.description}</td>
