@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -12,12 +12,16 @@ import {
   Platform,
   SafeAreaView,
   Linking,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
+import { db, storage } from '../firebase';
+import { collection, addDoc, doc, setDoc, query, where, orderBy, getDocs, serverTimestamp, increment } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
-const ChatScreen = ({ navigation }) => {
+const ChatScreen = ({ navigation, route }) => {
   const [messages, setMessages] = useState([
     {
       id: 1,
@@ -29,16 +33,115 @@ const ChatScreen = ({ navigation }) => {
   const [inputText, setInputText] = useState('');
   const [uploadedImages, setUploadedImages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [chatId, setChatId] = useState(null);
+  const [loading, setLoading] = useState(false);
   const flatListRef = useRef();
 
+  // Check if we're viewing an existing report
+  const existingReport = route.params?.report;
+
+  console.log(existingReport);
+
   const reportTypes = [
-    'Customer Complaint',
-    'Service Issue',
-    'Booking Problem',
-    'Luggage Issue',
-    'Flight Delay',
-    'Safety Concern',
+    'Lost Baggage',
+    'Damaged Baggage',
+    'Damaged Aircraft Infrastructure',
   ];
+
+  // Load existing chat or create new one
+  useEffect(() => {
+    const initializeChat = async () => {
+        console.log('existingReport', existingReport)
+      if (existingReport && existingReport.chat_id) {
+        // Load existing chat
+        setChatId(existingReport.chat_id);
+        await loadExistingChat(existingReport.chat_id);
+      } else {
+        // Create new chat
+        const newChatId = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        setChatId(newChatId);
+      }
+    };
+
+    initializeChat();
+  }, [existingReport]);
+
+  const loadExistingChat = async (chatId) => {
+    try {
+      setLoading(true);
+      const q = query(
+        collection(db, 'report-messages'),
+        where('chat_id', '==', chatId),
+        orderBy('timestamp', 'asc')
+      );
+      const messagesSnapshot = await getDocs(q);
+
+      const messagesData = messagesSnapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp?.toDate() || new Date(),
+      }));
+
+      console.log(messagesData);
+
+      if (messagesData.length > 0) {
+        setMessages(messagesData);
+      }
+    } catch (error) {
+      console.error('Error loading chat messages:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveMessageToFirestore = async (message) => {
+    if (!chatId) return;
+    
+    try {
+      // Save message to report-messages collection
+      await addDoc(collection(db, 'report-messages'), {
+        chat_id: chatId,
+        text: message.text,
+        sender: message.sender,
+        timestamp: serverTimestamp(),
+        images: message.images || null,
+      });
+      
+      // Update the chat metadata in report-chats collection
+      await setDoc(doc(db, 'report-chats', chatId), {
+        lastMessage: message.text,
+        lastMessageTime: serverTimestamp(),
+        messageCount: increment(1),
+        createdAt: serverTimestamp(),
+      }, { merge: true });
+      
+    } catch (error) {
+      console.error('Error saving message to Firestore:', error);
+    }
+  };
+
+  const uploadImageToStorage = async (imageUri) => {
+    try {
+      // Create a unique filename
+      const filename = `report-images/${Date.now()}-${Math.random().toString(36).substring(7)}.jpg`;
+      const storageRef = ref(storage, filename);
+      
+      // Convert image URI to blob
+      const response = await fetch(imageUri);
+      const blob = await response.blob();
+      
+      // Upload to Firebase Storage
+      const snapshot = await uploadBytes(storageRef, blob);
+      
+      // Get download URL
+      const downloadURL = await getDownloadURL(snapshot.ref);
+      
+      return downloadURL;
+    } catch (error) {
+      console.error('Error uploading image to Storage:', error);
+      throw error;
+    }
+  };
 
   const handleSendMessage = async () => {
     if (inputText.trim() === '') return;
@@ -54,12 +157,18 @@ const ChatScreen = ({ navigation }) => {
     setInputText('');
     setIsTyping(true);
 
+    // Save user message to Firestore
+    await saveMessageToFirestore(userMessage);
+
     // Simulate AI response
-    setTimeout(() => {
+    setTimeout(async () => {
       const aiResponse = generateAIResponse(inputText);
       setMessages(prev => [...prev, aiResponse]);
       setIsTyping(false);
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      
+      // Save AI response to Firestore
+      await saveMessageToFirestore(aiResponse);
     }, 1500);
   };
 
@@ -101,35 +210,50 @@ const ChatScreen = ({ navigation }) => {
     });
 
     if (!result.canceled) {
-      const newImages = result.assets.map(asset => ({
-        id: Date.now() + Math.random(),
-        uri: asset.uri,
-        timestamp: new Date(),
-      }));
-      
-      setUploadedImages(prev => [...prev, ...newImages]);
-      
-      // Add image message to chat
-      const imageMessage = {
-        id: Date.now(),
-        text: `Uploaded ${result.assets.length} image(s)`,
-        sender: 'user',
-        timestamp: new Date(),
-        images: result.assets,
-      };
-      
-      setMessages(prev => [...prev, imageMessage]);
-      
-      // AI response for images
-      setTimeout(() => {
-        const aiImageResponse = {
-          id: Date.now() + 1,
-          text: "I can see the images you've uploaded. I'm analyzing them to help with your report. Could you describe what these images show?",
-          sender: 'ai',
+      try {
+        // Upload images to Firebase Storage
+        const uploadPromises = result.assets.map(asset => uploadImageToStorage(asset.uri));
+        const downloadURLs = await Promise.all(uploadPromises);
+        
+        const newImages = downloadURLs.map((url, index) => ({
+          id: Date.now() + Math.random(),
+          uri: url,
           timestamp: new Date(),
+        }));
+        
+        setUploadedImages(prev => [...prev, ...newImages]);
+        
+        // Add image message to chat
+        const imageMessage = {
+          id: Date.now(),
+          text: `Uploaded ${result.assets.length} image(s)`,
+          sender: 'user',
+          timestamp: new Date(),
+          images: downloadURLs.map(url => ({ uri: url })),
         };
-        setMessages(prev => [...prev, aiImageResponse]);
-      }, 1000);
+        
+        setMessages(prev => [...prev, imageMessage]);
+        
+        // Save image message to Firestore
+        await saveMessageToFirestore(imageMessage);
+        
+        // AI response for images
+        setTimeout(async () => {
+          const aiImageResponse = {
+            id: Date.now() + 1,
+            text: "I can see the images you've uploaded. I'm analyzing them to help with your report. Could you describe what these images show?",
+            sender: 'ai',
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, aiImageResponse]);
+          
+          // Save AI response to Firestore
+          await saveMessageToFirestore(aiImageResponse);
+        }, 1000);
+      } catch (error) {
+        console.error('Error uploading images:', error);
+        Alert.alert('Error', 'Failed to upload images. Please try again.');
+      }
     }
   };
 
@@ -154,23 +278,48 @@ const ChatScreen = ({ navigation }) => {
     });
 
     if (!result.canceled) {
-      const newImage = {
-        id: Date.now(),
-        uri: result.assets[0].uri,
-        timestamp: new Date(),
-      };
-      
-      setUploadedImages(prev => [...prev, newImage]);
-      
-      const imageMessage = {
-        id: Date.now(),
-        text: 'Photo taken',
-        sender: 'user',
-        timestamp: new Date(),
-        images: result.assets,
-      };
-      
-      setMessages(prev => [...prev, imageMessage]);
+      try {
+        // Upload photo to Firebase Storage
+        const downloadURL = await uploadImageToStorage(result.assets[0].uri);
+        
+        const newImage = {
+          id: Date.now(),
+          uri: downloadURL,
+          timestamp: new Date(),
+        };
+        
+        setUploadedImages(prev => [...prev, newImage]);
+        
+        const imageMessage = {
+          id: Date.now(),
+          text: 'Photo taken',
+          sender: 'user',
+          timestamp: new Date(),
+          images: [{ uri: downloadURL }],
+        };
+        
+        setMessages(prev => [...prev, imageMessage]);
+        
+        // Save photo message to Firestore
+        await saveMessageToFirestore(imageMessage);
+        
+        // AI response for photo
+        setTimeout(async () => {
+          const aiPhotoResponse = {
+            id: Date.now() + 1,
+            text: "I can see the photo you've taken. I'm analyzing it to help with your report. Could you describe what this image shows?",
+            sender: 'ai',
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, aiPhotoResponse]);
+          
+          // Save AI response to Firestore
+          await saveMessageToFirestore(aiPhotoResponse);
+        }, 1000);
+      } catch (error) {
+        console.error('Error uploading photo:', error);
+        Alert.alert('Error', 'Failed to upload photo. Please try again.');
+      }
     }
   };
 
@@ -216,39 +365,50 @@ const ChatScreen = ({ navigation }) => {
         <TouchableOpacity onPress={() => navigation.goBack()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color="#007AFF" />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>New Report</Text>
+        <Text style={styles.headerTitle}>
+          {existingReport ? existingReport.title : 'New Report'}
+        </Text>
       </View>
       <KeyboardAvoidingView 
         style={styles.container} 
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         {/* Report Type Selection */}
-        <View style={styles.reportTypeContainer}>
-          <Text style={styles.reportTypeTitle}>Report Type:</Text>
-          <FlatList
-            horizontal
-            data={reportTypes}
-            keyExtractor={(item) => item}
-            renderItem={({ item }) => (
-              <TouchableOpacity style={styles.reportTypeButton}>
-                <Text style={styles.reportTypeText}>{item}</Text>
-              </TouchableOpacity>
-            )}
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.reportTypeList}
-          />
-        </View>
+        {(!existingReport || existingReport.status !== 'Completed') && (
+          <View style={styles.reportTypeContainer}>
+            <Text style={styles.reportTypeTitle}>Report Type:</Text>
+            <FlatList
+              horizontal
+              data={reportTypes}
+              keyExtractor={(item) => item}
+              renderItem={({ item }) => (
+                <TouchableOpacity style={styles.reportTypeButton}>
+                  <Text style={styles.reportTypeText}>{item}</Text>
+                </TouchableOpacity>
+              )}
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.reportTypeList}
+            />
+          </View>
+        )}
 
         {/* Chat Messages */}
-        <FlatList
-          ref={flatListRef}
-          data={messages}
-          renderItem={renderMessage}
-          keyExtractor={(item) => item.id.toString()}
-          style={styles.messagesList}
-          onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
-          onLayout={() => flatListRef.current?.scrollToEnd()}
-        />
+        {loading ? (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#007AFF" />
+            <Text style={styles.loadingText}>Loading chat...</Text>
+          </View>
+        ) : (
+          <FlatList
+            ref={flatListRef}
+            data={messages}
+            renderItem={renderMessage}
+            keyExtractor={(item) => item.id.toString()}
+            style={styles.messagesList}
+            onContentSizeChange={() => flatListRef.current?.scrollToEnd()}
+            onLayout={() => flatListRef.current?.scrollToEnd()}
+          />
+        )}
 
         {/* Typing Indicator */}
         {isTyping && (
@@ -443,6 +603,17 @@ const styles = StyleSheet.create({
   },
   sendButtonDisabled: {
     backgroundColor: '#ccc',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 10,
   },
 });
 

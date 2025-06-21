@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,129 +8,135 @@ import {
   TextInput,
   SafeAreaView,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as Print from 'expo-print';
-import * as Sharing from 'expo-sharing';
+import { db } from '../firebase';
+import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
 
-const ReportsScreen = ({ navigation }) => {
+const ReportsScreen = ({ navigation, route }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedFilter, setSelectedFilter] = useState('All');
+  const [selectedSort, setSelectedSort] = useState('Date Created');
+  const [isSortExpanded, setIsSortExpanded] = useState(false);
+  const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
 
-  const reports = [
-    {
-      id: 1,
-      title: 'Damaged Luggage Report',
-      description: 'Customer reported damaged luggage upon arrival at destination airport.',
-      date: '2024-01-15',
-      status: 'Completed',
-      type: 'Customer Complaint',
-      priority: 'High',
-      agent: 'AI Agent #1',
-    },
-    {
-      id: 2,
-      title: 'Flight Delay Issue',
-      description: 'Flight UA123 delayed by 3 hours due to weather conditions.',
-      date: '2024-01-14',
-      status: 'In Progress',
-      type: 'Service Issue',
-      priority: 'Medium',
-      agent: 'AI Agent #2',
-    },
-    {
-      id: 3,
-      title: 'Seat Assignment Problem',
-      description: 'Customer unable to select preferred seat during online check-in.',
-      date: '2024-01-13',
-      status: 'Completed',
-      type: 'Booking Issue',
-      priority: 'Low',
-      agent: 'AI Agent #1',
-    },
-    {
-      id: 4,
-      title: 'Safety Concern - Turbulence',
-      description: 'Passenger reported severe turbulence during flight causing minor injuries.',
-      date: '2024-01-12',
-      status: 'Pending',
-      type: 'Safety Concern',
-      priority: 'High',
-      agent: 'AI Agent #3',
-    },
-    {
-      id: 5,
-      title: 'Lost Baggage Claim',
-      description: 'Baggage not found at carousel after international flight.',
-      date: '2024-01-11',
-      status: 'In Progress',
-      type: 'Luggage Issue',
-      priority: 'High',
-      agent: 'AI Agent #2',
-    },
-  ];
+  // Check if a filter was passed from navigation
+  useEffect(() => {
+    if (route.params?.filter) {
+      setSelectedFilter(route.params.filter);
+    }
+  }, [route.params?.filter]);
 
-  const generatePdf = async (report) => {
-    const htmlContent = `
-      <html>
-        <head>
-          <style>
-            body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; padding: 40px; }
-            h1 { color: #007AFF; border-bottom: 2px solid #007AFF; padding-bottom: 10px; }
-            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
-            th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-            th { background-color: #f2f2f2; }
-            .label { font-weight: bold; color: #555; }
-          </style>
-        </head>
-        <body>
-          <h1>United Airlines Report</h1>
-          <h2>Report ID: ${report.id}</h2>
-          
-          <table>
-            <tr>
-              <td class="label">Title</td>
-              <td>${report.title}</td>
-            </tr>
-            <tr>
-              <td class="label">Date</td>
-              <td>${report.date}</td>
-            </tr>
-            <tr>
-              <td class="label">Status</td>
-              <td>${report.status}</td>
-            </tr>
-             <tr>
-              <td class="label">Priority</td>
-              <td>${report.priority}</td>
-            </tr>
-            <tr>
-              <td class="label">Report Type</td>
-              <td>${report.type}</td>
-            </tr>
-             <tr>
-              <td class="label">Assigned Agent</td>
-              <td>${report.agent}</td>
-            </tr>
-            <tr>
-              <td class="label">Description</td>
-              <td>${report.description}</td>
-            </tr>
-          </table>
-        </body>
-      </html>
-    `;
+  useEffect(() => {
+    loadReportsFromFirestore();
+  }, []);
 
+  const loadReportsFromFirestore = async () => {
     try {
-      const { uri } = await Print.printToFileAsync({ html: htmlContent });
-      await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: 'Download Report PDF' });
+      setLoading(true);
+      const reportsRef = collection(db, 'reports');
+      const snapshot = await getDocs(reportsRef);
+      
+      const reportsData = [];
+      snapshot.forEach(doc => {
+        reportsData.push({
+          id: doc.id,
+          ...doc.data()
+        });
+      });
+      
+      setReports(reportsData);
     } catch (error) {
-      console.error('Failed to generate or share PDF:', error);
-      Alert.alert('Error', 'Could not generate or share the PDF.');
+      console.error('Error loading reports:', error);
+      Alert.alert('Error', 'Failed to load reports from database.');
+    } finally {
+      setLoading(false);
     }
   };
 
+  const handleViewReport = (report) => {
+    navigation.navigate('PdfPreview', { report });
+  };
+
+  const handleSubmitReport = (report) => {
+    Alert.alert(
+      "Confirm Submission",
+      `Are you sure you want to submit the report "${report.title}"? This action cannot be undone.`,
+      [
+        {
+          text: "Cancel",
+          style: "cancel"
+        },
+        { 
+          text: "Submit", 
+          onPress: async () => {
+            try {
+              const currentTime = new Date();
+              
+              // Update the report status and submitted_at in Firestore
+              await updateDoc(doc(db, 'reports', report.id), {
+                status: 'Completed',
+                submitted_at: currentTime
+              });
+              
+              // Update local state
+              setReports(prevReports => 
+                prevReports.map(r => 
+                  r.id === report.id ? { ...r, status: 'Completed', submitted_at: currentTime } : r
+                )
+              );
+              
+              Alert.alert("Success", "Your report has been successfully submitted.");
+            } catch (error) {
+              console.error('Error submitting report:', error);
+              Alert.alert('Error', 'Failed to submit report. Please try again.');
+            }
+          },
+          style: "destructive" 
+        }
+      ]
+    );
+  };
+
   const filters = ['All', 'Completed', 'In Progress', 'Pending'];
+
+  const sortOptions = ['Date Created', 'Last Message', 'Status', 'Priority', 'Title'];
+
+  const sortReports = (reportsToSort) => {
+    const sortedReports = [...reportsToSort];
+    
+    switch (selectedSort) {
+      case 'Date Created':
+        return sortedReports.sort((a, b) => new Date(b.date) - new Date(a.date));
+      
+      case 'Last Message':
+        return sortedReports.sort((a, b) => {
+          const aTime = a.lastMessageTime ? new Date(a.lastMessageTime) : new Date(0);
+          const bTime = b.lastMessageTime ? new Date(b.lastMessageTime) : new Date(0);
+          return bTime - aTime;
+        });
+      
+      case 'Status':
+        return sortedReports.sort((a, b) => {
+          const statusOrder = { 'Completed': 1, 'In Progress': 2, 'Pending': 3 };
+          return (statusOrder[a.status] || 4) - (statusOrder[b.status] || 4);
+        });
+      
+      case 'Priority':
+        return sortedReports.sort((a, b) => {
+          const priorityOrder = { 'High': 1, 'Medium': 2, 'Low': 3 };
+          return (priorityOrder[a.priority] || 4) - (priorityOrder[b.priority] || 4);
+        });
+      
+      case 'Title':
+        return sortedReports.sort((a, b) => a.title.localeCompare(b.title));
+      
+      default:
+        return sortedReports;
+    }
+  };
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -160,30 +166,29 @@ const ReportsScreen = ({ navigation }) => {
 
   const getTypeIcon = (type) => {
     switch (type) {
-      case 'Customer Complaint':
-        return 'warning';
-      case 'Service Issue':
-        return 'airplane';
-      case 'Booking Issue':
-        return 'calendar';
-      case 'Luggage Issue':
+      case 'Lost Baggage':
         return 'briefcase';
-      case 'Safety Concern':
-        return 'shield';
+      case 'Damaged Baggage':
+        return 'warning';
+      case 'Damaged Aircraft Infrastructure':
+        return 'construct';
       default:
         return 'document';
     }
   };
 
-  const filteredReports = reports.filter(report => {
+  const filteredReports = sortReports(reports.filter(report => {
     const matchesSearch = report.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                          report.description.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesFilter = selectedFilter === 'All' || report.status === selectedFilter;
     return matchesSearch && matchesFilter;
-  });
+  }));
 
   const renderReport = ({ item }) => (
-    <TouchableOpacity style={styles.reportCard}>
+    <TouchableOpacity 
+      style={styles.reportCard}
+      onPress={() => navigation.navigate('Chat', { report: item })}
+    >
       <View style={styles.reportHeader}>
         <View style={styles.reportIcon}>
           <Ionicons name={getTypeIcon(item.type)} size={20} color="#007AFF" />
@@ -209,14 +214,30 @@ const ReportsScreen = ({ navigation }) => {
       </View>
       <View style={styles.reportFooter}>
         <Text style={styles.reportDate}>{item.date}</Text>
-        <TouchableOpacity style={styles.viewButton}>
-          <Text style={styles.viewButtonText}>View Details</Text>
-          <Ionicons name="chevron-forward" size={16} color="#007AFF" />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.downloadButton} onPress={() => generatePdf(item)}>
-          <Ionicons name="download-outline" size={18} color="#007AFF" />
-          <Text style={styles.downloadButtonText}>Download PDF</Text>
-        </TouchableOpacity>
+        <View style={styles.actionsContainer}>
+          {item.status !== 'Completed' && (
+            <TouchableOpacity 
+              style={styles.submitButton} 
+              onPress={(e) => {
+                e.stopPropagation(); // Prevent card click
+                handleSubmitReport(item);
+              }}
+            >
+              <Ionicons name="paper-plane-outline" size={16} color="#fff" />
+              <Text style={styles.submitButtonText}>Submit</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity 
+            style={styles.viewButton} 
+            onPress={(e) => {
+              e.stopPropagation(); // Prevent card click
+              handleViewReport(item);
+            }}
+          >
+            <Ionicons name="eye-outline" size={18} color="#007AFF" />
+            <Text style={styles.viewButtonText}>View PDF</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </TouchableOpacity>
   );
@@ -274,15 +295,68 @@ const ReportsScreen = ({ navigation }) => {
         />
       </View>
 
+      {/* Sort Options */}
+      <View style={styles.sortContainer}>
+        <View style={styles.sortHeader}>
+          <Text style={styles.sortLabel}>Sort by: {selectedSort}</Text>
+          <TouchableOpacity 
+            style={styles.sortToggleButton}
+            onPress={() => setIsSortExpanded(!isSortExpanded)}
+          >
+            <Ionicons 
+              name={isSortExpanded ? "chevron-up" : "chevron-down"} 
+              size={20} 
+              color="#007AFF" 
+            />
+          </TouchableOpacity>
+        </View>
+        
+        {isSortExpanded && (
+          <FlatList
+            horizontal
+            data={sortOptions}
+            keyExtractor={(item) => item}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={[
+                  styles.sortButton,
+                  selectedSort === item && styles.sortButtonActive
+                ]}
+                onPress={() => {
+                  setSelectedSort(item);
+                  setIsSortExpanded(false); // Collapse after selection
+                }}
+              >
+                <Text style={[
+                  styles.sortText,
+                  selectedSort === item && styles.sortTextActive
+                ]}>
+                  {item}
+                </Text>
+              </TouchableOpacity>
+            )}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.sortList}
+          />
+        )}
+      </View>
+
       {/* Reports List */}
-      <FlatList
-        data={filteredReports}
-        renderItem={renderReport}
-        keyExtractor={(item) => item.id.toString()}
-        style={styles.reportsList}
-        contentContainerStyle={styles.reportsContent}
-        showsVerticalScrollIndicator={false}
-      />
+      {loading ? (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color="#007AFF" />
+          <Text style={styles.loadingText}>Loading reports...</Text>
+        </View>
+      ) : (
+        <FlatList
+          data={filteredReports}
+          renderItem={renderReport}
+          keyExtractor={(item) => item.id.toString()}
+          style={styles.reportsList}
+          contentContainerStyle={styles.reportsContent}
+          showsVerticalScrollIndicator={false}
+        />
+      )}
     </SafeAreaView>
   );
 };
@@ -356,6 +430,48 @@ const styles = StyleSheet.create({
   },
   filterTextActive: {
     color: '#fff',
+  },
+  sortContainer: {
+    backgroundColor: '#fff',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  sortHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 15,
+  },
+  sortLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: '#333',
+  },
+  sortToggleButton: {
+    padding: 5,
+  },
+  sortButton: {
+    paddingHorizontal: 20,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginRight: 10,
+    backgroundColor: '#f0f0f0',
+  },
+  sortButtonActive: {
+    backgroundColor: '#007AFF',
+  },
+  sortText: {
+    color: '#666',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  sortTextActive: {
+    color: '#fff',
+  },
+  sortList: {
+    paddingHorizontal: 15,
+    paddingTop: 5,
   },
   reportsList: {
     flex: 1,
@@ -451,6 +567,10 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#f0f0f0',
   },
+  actionsContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   reportDate: {
     fontSize: 12,
     color: '#999',
@@ -460,26 +580,42 @@ const styles = StyleSheet.create({
   viewButton: {
     flexDirection: 'row',
     alignItems: 'center',
-  },
-  viewButtonText: {
-    color: '#007AFF',
-    fontSize: 14,
-    fontWeight: '500',
-    marginRight: 4,
-  },
-  downloadButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
     backgroundColor: '#eaf5ff',
     paddingHorizontal: 10,
     paddingVertical: 5,
     borderRadius: 15,
+    marginLeft: 10,
   },
-  downloadButtonText: {
+  viewButtonText: {
     color: '#007AFF',
     fontSize: 12,
     fontWeight: '500',
     marginLeft: 5,
+  },
+  submitButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#4CAF50',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 15,
+  },
+  submitButtonText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 6,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    color: '#007AFF',
+    fontSize: 16,
+    fontWeight: '500',
+    marginTop: 10,
   },
 });
 

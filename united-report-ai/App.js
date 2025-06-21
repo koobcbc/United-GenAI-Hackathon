@@ -8,6 +8,7 @@ import { Ionicons } from '@expo/vector-icons';
 import DashboardScreen from './screens/DashboardScreen';
 import ChatScreen from './screens/ChatScreen';
 import ReportsScreen from './screens/ReportsScreen';
+import PdfPreviewScreen from './screens/PdfPreviewScreen';
 
 const Stack = createStackNavigator();
 const Tab = createBottomTabNavigator();
@@ -44,16 +45,31 @@ export default function App() {
       <StatusBar style="auto" />
       <Stack.Navigator
         screenOptions={{
-          headerShown: false,
+          headerShown: true,
+          headerStyle: {
+            backgroundColor: '#007AFF',
+          },
+          headerTintColor: '#fff',
+          headerTitleStyle: {
+            fontWeight: 'bold',
+          },
         }}
       >
         <Stack.Screen 
           name="Main" 
           component={TabNavigator} 
+          options={{ headerShown: false }}
         />
         <Stack.Screen 
           name="Chat" 
           component={ChatScreen}
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen 
+          name="PdfPreview" 
+          component={PdfPreviewScreen}
+          options={{
+          }}
         />
       </Stack.Navigator>
     </NavigationContainer>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,33 +6,20 @@ import {
   TouchableOpacity,
   ScrollView,
   SafeAreaView,
+  ActivityIndicator,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { db } from '../firebase';
+import { collection, getDocs } from 'firebase/firestore';
 
 const DashboardScreen = ({ navigation }) => {
-  const recentReports = [
-    {
-      id: 1,
-      title: 'Damaged Luggage Report',
-      date: '2024-01-15',
-      status: 'Completed',
-      type: 'Customer Complaint',
-    },
-    {
-      id: 2,
-      title: 'Flight Delay Issue',
-      date: '2024-01-14',
-      status: 'In Progress',
-      type: 'Service Issue',
-    },
-    {
-      id: 3,
-      title: 'Seat Assignment Problem',
-      date: '2024-01-13',
-      status: 'Completed',
-      type: 'Booking Issue',
-    },
-  ];
+  const [recentReports, setRecentReports] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [stats, setStats] = useState({
+    total: 0,
+    completed: 0,
+    inProgress: 0,
+  });
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -49,16 +36,47 @@ const DashboardScreen = ({ navigation }) => {
 
   const getTypeIcon = (type) => {
     switch (type) {
-      case 'Customer Complaint':
+      case 'Lost Baggage':
+        return 'briefcase';
+      case 'Damaged Baggage':
         return 'warning';
-      case 'Service Issue':
-        return 'airplane';
-      case 'Booking Issue':
-        return 'calendar';
+      case 'Damaged Aircraft Infrastructure':
+        return 'construct';
       default:
         return 'document';
     }
   };
+
+  useEffect(() => {
+    // Fetch reports from Firestore
+    const fetchReports = async () => {
+      try {
+        setLoading(true);
+        const reportsSnapshot = await getDocs(collection(db, 'reports'));
+        const reportsData = reportsSnapshot.docs.map((doc) => ({
+          id: doc.id,
+          ...doc.data(),
+        }));
+
+        // Calculate stats
+        const total = reportsData.length;
+        const completed = reportsData.filter(report => report.status === 'Completed').length;
+        const inProgress = reportsData.filter(report => report.status === 'In Progress').length;
+
+        setStats({ total, completed, inProgress });
+        
+        // Get recent reports (last 3)
+        const recent = reportsData.slice(0, 3);
+        setRecentReports(recent);
+      } catch (error) {
+        console.error('Error fetching reports:', error);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchReports();
+  }, []);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -71,21 +89,45 @@ const DashboardScreen = ({ navigation }) => {
 
         {/* Quick Stats */}
         <View style={styles.statsContainer}>
-          <View style={styles.statCard}>
+          <TouchableOpacity 
+            style={[styles.statCard, stats.total === 0 && styles.statCardDisabled]}
+            onPress={() => {
+              if (stats.total !== 0) {
+                navigation.navigate('Reports', { filter: 'All' });
+              }
+            }}
+            disabled={stats.total === 0}
+          >
             <Ionicons name="document-text" size={24} color="#007AFF" />
-            <Text style={styles.statNumber}>24</Text>
+            <Text style={styles.statNumber}>{stats.total}</Text>
             <Text style={styles.statLabel}>Total Reports</Text>
-          </View>
-          <View style={styles.statCard}>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.statCard, stats.completed === 0 && styles.statCardDisabled]}
+            onPress={() => {
+              if (stats.completed !== 0) {
+                navigation.navigate('Reports', { filter: 'Completed' });
+              }
+            }}
+            disabled={stats.completed === 0}
+          >
             <Ionicons name="checkmark-circle" size={24} color="#4CAF50" />
-            <Text style={styles.statNumber}>18</Text>
+            <Text style={styles.statNumber}>{stats.completed}</Text>
             <Text style={styles.statLabel}>Completed</Text>
-          </View>
-          <View style={styles.statCard}>
+          </TouchableOpacity>
+          <TouchableOpacity 
+            style={[styles.statCard, stats.inProgress === 0 && styles.statCardDisabled]}
+            onPress={() => {
+              if (stats.inProgress !== 0) {
+                navigation.navigate('Reports', { filter: 'In Progress' });
+              }
+            }}
+            disabled={stats.inProgress === 0}
+          >
             <Ionicons name="time" size={24} color="#FF9800" />
-            <Text style={styles.statNumber}>6</Text>
+            <Text style={styles.statNumber}>{stats.inProgress}</Text>
             <Text style={styles.statLabel}>In Progress</Text>
-          </View>
+          </TouchableOpacity>
         </View>
 
         {/* Create New Report Button */}
@@ -100,25 +142,36 @@ const DashboardScreen = ({ navigation }) => {
         {/* Recent Reports */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Recent Reports</Text>
-          {recentReports.map((report) => (
-            <TouchableOpacity key={report.id} style={styles.reportCard}>
-              <View style={styles.reportHeader}>
-                <View style={styles.reportIcon}>
-                  <Ionicons name={getTypeIcon(report.type)} size={20} color="#007AFF" />
-                </View>
-                <View style={styles.reportInfo}>
-                  <Text style={styles.reportTitle}>{report.title}</Text>
-                  <Text style={styles.reportType}>{report.type}</Text>
-                </View>
-                <View style={styles.reportStatus}>
-                  <View style={[styles.statusBadge, { backgroundColor: getStatusColor(report.status) }]}>
-                    <Text style={styles.statusText}>{report.status}</Text>
+          {loading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="small" color="#007AFF" />
+              <Text style={styles.loadingText}>Loading reports...</Text>
+            </View>
+          ) : (
+            recentReports.map((report) => (
+              <TouchableOpacity 
+                key={report.id} 
+                style={styles.reportCard}
+                onPress={() => navigation.navigate('Chat', { report: report })}
+              >
+                <View style={styles.reportHeader}>
+                  <View style={styles.reportIcon}>
+                    <Ionicons name={getTypeIcon(report.type)} size={20} color="#007AFF" />
                   </View>
-                  <Text style={styles.reportDate}>{report.date}</Text>
+                  <View style={styles.reportInfo}>
+                    <Text style={styles.reportTitle}>{report.title}</Text>
+                    <Text style={styles.reportType}>{report.type}</Text>
+                  </View>
+                  <View style={styles.reportStatus}>
+                    <View style={[styles.statusBadge, { backgroundColor: getStatusColor(report.status) }]}>
+                      <Text style={styles.statusText}>{report.status}</Text>
+                    </View>
+                    <Text style={styles.reportDate}>{report.date}</Text>
+                  </View>
                 </View>
-              </View>
-            </TouchableOpacity>
-          ))}
+              </TouchableOpacity>
+            ))
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -169,6 +222,9 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 3.84,
     elevation: 5,
+  },
+  statCardDisabled: {
+    backgroundColor: '#ccc',
   },
   statNumber: {
     fontSize: 24,
@@ -270,6 +326,18 @@ const styles = StyleSheet.create({
   reportDate: {
     fontSize: 12,
     color: '#999',
+  },
+  loadingContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  loadingText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#333',
+    marginLeft: 10,
   },
 });
 
