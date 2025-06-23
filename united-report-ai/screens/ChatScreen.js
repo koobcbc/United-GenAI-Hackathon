@@ -17,9 +17,11 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
+import Markdown from 'react-native-markdown-display';
 import { db, storage } from '../firebase';
-import { collection, addDoc, doc, setDoc, query, where, orderBy, getDocs, serverTimestamp, increment } from 'firebase/firestore';
+import { collection, addDoc, doc, setDoc, query, where, orderBy, getDocs, serverTimestamp, increment, updateDoc, writeBatch, deleteDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { callSupervisorAgent, callSupervisorAgentWithText } from '../api';
 
 const ChatScreen = ({ navigation, route }) => {
   const [messages, setMessages] = useState([
@@ -31,8 +33,8 @@ const ChatScreen = ({ navigation, route }) => {
     },
   ]);
   const [inputText, setInputText] = useState('');
-  const [uploadedImages, setUploadedImages] = useState([]);
   const [isTyping, setIsTyping] = useState(false);
+  const [isAnalyzingImage, setIsAnalyzingImage] = useState(false);
   const [chatId, setChatId] = useState(null);
   const [loading, setLoading] = useState(false);
   const flatListRef = useRef();
@@ -40,10 +42,8 @@ const ChatScreen = ({ navigation, route }) => {
   // Check if we're viewing an existing report
   const existingReport = route.params?.report;
 
-  console.log(existingReport);
-
   const reportTypes = [
-    'Lost Baggage',
+    // 'Lost Baggage',
     'Damaged Baggage',
     'Damaged Aircraft Infrastructure',
   ];
@@ -51,15 +51,21 @@ const ChatScreen = ({ navigation, route }) => {
   // Load existing chat or create new one
   useEffect(() => {
     const initializeChat = async () => {
-        console.log('existingReport', existingReport)
       if (existingReport && existingReport.chat_id) {
         // Load existing chat
         setChatId(existingReport.chat_id);
         await loadExistingChat(existingReport.chat_id);
       } else {
-        // Create new chat
+        // --- Create New Chat ---
         const newChatId = `chat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         setChatId(newChatId);
+
+        // The default message is already set in the component's initial state.
+        // We just need to save this initial message to Firestore for our new chat ID.
+        const initialMessage = messages[0];
+        if (initialMessage) {
+          saveMessageToFirestore(initialMessage, newChatId);
+        }
       }
     };
 
@@ -82,8 +88,6 @@ const ChatScreen = ({ navigation, route }) => {
         timestamp: doc.data().timestamp?.toDate() || new Date(),
       }));
 
-      console.log(messagesData);
-
       if (messagesData.length > 0) {
         setMessages(messagesData);
       }
@@ -94,29 +98,37 @@ const ChatScreen = ({ navigation, route }) => {
     }
   };
 
-  const saveMessageToFirestore = async (message) => {
-    if (!chatId) return;
+  const saveMessageToFirestore = async (message, chatIdOverride = null) => {
+    const idToUse = chatIdOverride || chatId;
+    if (!idToUse) return null;
     
     try {
+      // Create a new document reference first to get the ID
+      const messageRef = doc(collection(db, 'report-messages'));
+
       // Save message to report-messages collection
-      await addDoc(collection(db, 'report-messages'), {
-        chat_id: chatId,
+      await setDoc(messageRef, {
+        chat_id: idToUse,
         text: message.text,
         sender: message.sender,
-        timestamp: serverTimestamp(),
+        timestamp: serverTimestamp(), // Use server timestamp for ultimate accuracy
         images: message.images || null,
+        isOptimistic: message.isOptimistic || false,
       });
       
-      // Update the chat metadata in report-chats collection
-      await setDoc(doc(db, 'report-chats', chatId), {
-        lastMessage: message.text,
-        lastMessageTime: serverTimestamp(),
-        messageCount: increment(1),
-        createdAt: serverTimestamp(),
+      // Update/create the chat metadata in report-chats collection
+      await setDoc(doc(db, 'report-chats', idToUse), {
+        last_message: message.text,
+        last_message_time: serverTimestamp(),
+        message_count: increment(1),
+        created_at: serverTimestamp(),
       }, { merge: true });
+
+      return messageRef; // Return the reference to the new document
       
     } catch (error) {
       console.error('Error saving message to Firestore:', error);
+      return null;
     }
   };
 
@@ -143,6 +155,187 @@ const ChatScreen = ({ navigation, route }) => {
     }
   };
 
+  /**
+   * Maps API severity/priority values to the ones used in the app.
+   * @param {string} apiPriority The priority from the API ('Severe', etc.).
+   * @returns {string} The mapped priority ('High', 'Medium', 'Low').
+   */
+  const mapApiPriority = (apiPriority) => {
+    switch (apiPriority?.toLowerCase()) {
+      case 'severe':
+      case 'safety critical':
+        return 'High';
+      case 'moderate':
+        return 'Medium';
+      default:
+        return 'Low';
+    }
+  };
+
+  /**
+   * Processes the response from the supervisor agent to create or update a report.
+   * @param {object} apiResponse The JSON response from the supervisor agent.
+   */
+  const handleApiResponse = async (apiResponse) => {
+    if (!apiResponse?.detection_result || !apiResponse?.form_response) {
+      throw new Error("Invalid API response structure.");
+    }
+
+    const { detection_result, form_response } = apiResponse;
+    const generatedForm = JSON.parse(form_response.generated_form || '{}');
+
+    // Create the report data object from the API response
+    const reportData = {
+      title: detection_result.item || 'Untitled Report',
+      description: detection_result.description || 'No description provided.',
+      priority: mapApiPriority(detection_result.priority),
+      category: generatedForm.issue_type || 'Uncategorized',
+      status: 'In Progress',
+      type: detection_result.type,
+    };
+
+    let reportId = existingReport?.id;
+    
+    if (reportId) {
+      // --- Update Existing Report ---
+      console.log(`Updating existing report ID: ${reportId}`);
+      const reportRef = doc(db, 'reports', reportId);
+      await updateDoc(reportRef, {
+        ...reportData,
+        updated_at: serverTimestamp(),
+      });
+    } else {
+      // --- Create New Report ---
+      console.log("Creating new report...");
+      const newReportRef = doc(collection(db, 'reports'));
+      reportId = newReportRef.id;
+      
+      const batch = writeBatch(db);
+
+      // 1. Create the new report
+      batch.set(newReportRef, {
+        ...reportData,
+        chat_id: chatId, // Link report to this chat
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+        date: new Date().toISOString().split('T')[0], // Format as yyyy-mm-dd
+      });
+
+      // 2. Update the chat document with the new report_id
+      const chatRef = doc(db, 'report-chats', chatId);
+      batch.set(chatRef, { report_id: reportId }, { merge: true });
+
+      await batch.commit();
+
+      // Update local state to reflect the new report
+      navigation.setParams({ report: { id: reportId, ...reportData } });
+    }
+
+    // --- Add AI confirmation message to chat ---
+    const confirmationText = `I've analyzed the image. ${reportId === existingReport?.id ? 'The report has been updated' : 'A new report has been created'}:
+    - **Item:** ${reportData.title}
+    - **Priority:** ${reportData.priority}
+    - **Description:** ${reportData.description}`;
+
+    const aiMessage = {
+      id: Date.now(),
+      text: confirmationText,
+      sender: 'ai',
+      timestamp: new Date(),
+    };
+
+    setMessages(prev => [...prev, aiMessage]);
+    await saveMessageToFirestore(aiMessage);
+
+    // Show success alert for new reports
+    if (!existingReport?.id) {
+      Alert.alert(
+        'Report Created Successfully!',
+        `Your report "${reportData.title}" has been created and is now visible in the Dashboard and Reports tab.`,
+        [
+          {
+            text: 'Continue Chatting',
+            style: 'cancel'
+          },
+          {
+            text: 'View Report',
+            onPress: () => navigation.navigate('PdfPreview', { 
+              report: { 
+                id: reportId, 
+                ...reportData,
+                chat_id: chatId,
+                date: new Date().toISOString().split('T')[0],
+                created_at: new Date(),
+                updated_at: new Date()
+              } 
+            })
+          }
+        ]
+      );
+    }
+  };
+  
+  const handleReportTypeSelection = async (reportType) => {
+    // 1. Construct the message text that simulates user input
+    const messageText = `I want to generate a report for ${reportType}.`;
+
+    // 2. Create the user message object
+    const userMessage = {
+      id: Date.now(),
+      text: messageText,
+      sender: 'user',
+      timestamp: new Date(),
+    };
+
+    // 3. Add the message to the UI and save it to Firestore
+    setMessages(prev => [...prev, userMessage]);
+    await saveMessageToFirestore(userMessage);
+
+    // 4. Trigger API call for AI response (same as handleSendMessage)
+    setIsTyping(true);
+    setTimeout(async () => {
+      try {
+        const apiResponse = await callSupervisorAgentWithText(messageText);
+        console.log("API response for report type selection:", apiResponse);
+        
+        // Create AI message from API response
+        const aiResponse = {
+          id: Date.now() + 1,
+          text: apiResponse.reply || apiResponse.response || apiResponse.message || "I understand your message. Let me help you with that.",
+          sender: 'ai',
+          timestamp: new Date(),
+        };
+        
+        setMessages(prev => [...prev, aiResponse]);
+        setIsTyping(false);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        // Save AI response to Firestore
+        await saveMessageToFirestore(aiResponse);
+        
+        // Log the full API response for debugging
+        console.log("Full API response for report type selection:", apiResponse);
+        
+      } catch (error) {
+        console.error("Error calling API for report type selection:", error);
+        
+        // Fallback to generic response if API fails
+        const fallbackResponse = {
+          id: Date.now() + 1,
+          text: "I understand your concern. Let me help you document this issue properly. Could you provide more details?",
+          sender: 'ai',
+          timestamp: new Date(),
+        };
+        
+        setMessages(prev => [...prev, fallbackResponse]);
+        setIsTyping(false);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        await saveMessageToFirestore(fallbackResponse);
+      }
+    }, 1500);
+  };
+
   const handleSendMessage = async () => {
     if (inputText.trim() === '') return;
 
@@ -160,32 +353,48 @@ const ChatScreen = ({ navigation, route }) => {
     // Save user message to Firestore
     await saveMessageToFirestore(userMessage);
 
-    // Simulate AI response
+    // Call the API for AI response
     setTimeout(async () => {
-      const aiResponse = generateAIResponse(inputText);
-      setMessages(prev => [...prev, aiResponse]);
-      setIsTyping(false);
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      
-      // Save AI response to Firestore
-      await saveMessageToFirestore(aiResponse);
+      try {
+        const apiResponse = await callSupervisorAgentWithText(inputText);
+        console.log("API response:", apiResponse);
+        
+        // Create AI message from API response
+        const aiResponse = {
+          id: Date.now() + 1,
+          text: apiResponse.reply || apiResponse.response || apiResponse.message || "I understand your message. Let me help you with that.",
+          sender: 'ai',
+          timestamp: new Date(),
+        };
+        
+        setMessages(prev => [...prev, aiResponse]);
+        setIsTyping(false);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        // Save AI response to Firestore
+        await saveMessageToFirestore(aiResponse);
+        
+        // Log the full API response for debugging
+        console.log("Full API response for text message:", apiResponse);
+        
+      } catch (error) {
+        console.error("Error calling API for text message:", error);
+        
+        // Fallback to generic response if API fails
+        const fallbackResponse = {
+          id: Date.now() + 1,
+          text: "I understand your concern. Let me help you document this issue properly. Could you provide more details?",
+          sender: 'ai',
+          timestamp: new Date(),
+        };
+        
+        setMessages(prev => [...prev, fallbackResponse]);
+        setIsTyping(false);
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        
+        await saveMessageToFirestore(fallbackResponse);
+      }
     }, 1500);
-  };
-
-  const generateAIResponse = (userInput) => {
-    const responses = [
-      "I understand your concern. Let me help you document this issue properly. Could you provide more details about when this occurred?",
-      "Thank you for reporting this. I'm analyzing the information you've provided. Is there anything else you'd like to add?",
-      "I've noted this in your report. Based on the images and information provided, I can help escalate this to the appropriate department.",
-      "This is important information. Let me create a comprehensive report with all the details you've shared.",
-    ];
-    
-    return {
-      id: Date.now() + 1,
-      text: responses[Math.floor(Math.random() * responses.length)],
-      sender: 'ai',
-      timestamp: new Date(),
-    };
   };
 
   const pickImage = async () => {
@@ -205,54 +414,67 @@ const ChatScreen = ({ navigation, route }) => {
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsMultipleSelection: true,
+      allowsMultipleSelection: false,
       quality: 0.8,
     });
 
-    if (!result.canceled) {
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const imageAsset = result.assets[0];
+      const localImageUri = imageAsset.uri;
+
+      // --- Step 1: Immediately create and save a placeholder message with image ---
+      const optimisticMessageId = `optimistic_${Date.now()}`;
+      const placeholderMessage = {
+        id: optimisticMessageId,
+        text: 'Image uploaded',
+        sender: 'user',
+        timestamp: new Date(),
+        images: [{ uri: localImageUri, width: imageAsset.width, height: imageAsset.height }],
+        isOptimistic: true,
+      };
+      
+      setMessages(prev => [...prev, placeholderMessage]);
+      // Save placeholder to Firestore immediately to lock in the timestamp
+      const placeholderDocRef = await saveMessageToFirestore(placeholderMessage);
+
+      // Show analyzing indicator
+      setIsAnalyzingImage(true);
+
       try {
-        // Upload images to Firebase Storage
-        const uploadPromises = result.assets.map(asset => uploadImageToStorage(asset.uri));
-        const downloadURLs = await Promise.all(uploadPromises);
+        // --- Step 2: Background Processing (Parallel) ---
+        const [imageUrl, apiResponse] = await Promise.all([
+          uploadImageToStorage(localImageUri),
+          callSupervisorAgent(localImageUri)
+        ]);
+        await handleApiResponse(apiResponse);
         
-        const newImages = downloadURLs.map((url, index) => ({
-          id: Date.now() + Math.random(),
-          uri: url,
-          timestamp: new Date(),
-        }));
-        
-        setUploadedImages(prev => [...prev, ...newImages]);
-        
-        // Add image message to chat
-        const imageMessage = {
-          id: Date.now(),
-          text: `Uploaded ${result.assets.length} image(s)`,
-          sender: 'user',
-          timestamp: new Date(),
-          images: downloadURLs.map(url => ({ uri: url })),
+        // --- Step 3: Update the placeholder with final data ---
+        const finalMessageData = {
+          text: `Image analyzed: ${apiResponse.detection_result.item}`,
+          images: [{ uri: imageUrl, width: imageAsset.width, height: imageAsset.height }],
+          isOptimistic: false,
         };
+
+        // Update in UI
+        setMessages(prev => prev.map(msg => 
+          msg.id === optimisticMessageId ? { ...msg, ...finalMessageData } : msg
+        ));
         
-        setMessages(prev => [...prev, imageMessage]);
-        
-        // Save image message to Firestore
-        await saveMessageToFirestore(imageMessage);
-        
-        // AI response for images
-        setTimeout(async () => {
-          const aiImageResponse = {
-            id: Date.now() + 1,
-            text: "I can see the images you've uploaded. I'm analyzing them to help with your report. Could you describe what these images show?",
-            sender: 'ai',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, aiImageResponse]);
-          
-          // Save AI response to Firestore
-          await saveMessageToFirestore(aiImageResponse);
-        }, 1000);
+        // Update in Firestore
+        if (placeholderDocRef) {
+          await updateDoc(placeholderDocRef, finalMessageData);
+        }
+
       } catch (error) {
-        console.error('Error uploading images:', error);
-        Alert.alert('Error', 'Failed to upload images. Please try again.');
+        console.error('Full image processing pipeline failed:', error);
+        Alert.alert('Analysis Failed', error.message || 'Could not analyze the image. Please try again.');
+        // On failure, remove the optimistic message from UI and Firestore
+        setMessages(prev => prev.filter(msg => msg.id !== optimisticMessageId));
+        if (placeholderDocRef) {
+          await deleteDoc(placeholderDocRef);
+        }
+      } finally {
+        setIsAnalyzingImage(false);
       }
     }
   };
@@ -277,48 +499,62 @@ const ChatScreen = ({ navigation, route }) => {
       quality: 0.8,
     });
 
-    if (!result.canceled) {
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      const imageAsset = result.assets[0];
+      const localImageUri = imageAsset.uri;
+
+      // --- Step 1: Immediately create and save a placeholder message with image ---
+      const optimisticMessageId = `optimistic_${Date.now()}`;
+      const placeholderMessage = {
+        id: optimisticMessageId,
+        text: 'Photo captured',
+        sender: 'user',
+        timestamp: new Date(),
+        images: [{ uri: localImageUri, width: imageAsset.width, height: imageAsset.height }],
+        isOptimistic: true,
+      };
+
+      setMessages(prev => [...prev, placeholderMessage]);
+      const placeholderDocRef = await saveMessageToFirestore(placeholderMessage);
+
+      // Show analyzing indicator
+      setIsAnalyzingImage(true);
+
       try {
-        // Upload photo to Firebase Storage
-        const downloadURL = await uploadImageToStorage(result.assets[0].uri);
+        // --- Step 2: Background Processing (Parallel) ---
+        const [imageUrl, apiResponse] = await Promise.all([
+          uploadImageToStorage(localImageUri),
+          callSupervisorAgent(localImageUri)
+        ]);
+        await handleApiResponse(apiResponse);
         
-        const newImage = {
-          id: Date.now(),
-          uri: downloadURL,
-          timestamp: new Date(),
+        // --- Step 3: Update the placeholder with final data ---
+        const finalMessageData = {
+          text: `Image analyzed: ${apiResponse.detection_result.item}`,
+          images: [{ uri: imageUrl, width: imageAsset.width, height: imageAsset.height }],
+          isOptimistic: false,
         };
+
+        // Update in UI
+        setMessages(prev => prev.map(msg => 
+          msg.id === optimisticMessageId ? { ...msg, ...finalMessageData } : msg
+        ));
         
-        setUploadedImages(prev => [...prev, newImage]);
-        
-        const imageMessage = {
-          id: Date.now(),
-          text: 'Photo taken',
-          sender: 'user',
-          timestamp: new Date(),
-          images: [{ uri: downloadURL }],
-        };
-        
-        setMessages(prev => [...prev, imageMessage]);
-        
-        // Save photo message to Firestore
-        await saveMessageToFirestore(imageMessage);
-        
-        // AI response for photo
-        setTimeout(async () => {
-          const aiPhotoResponse = {
-            id: Date.now() + 1,
-            text: "I can see the photo you've taken. I'm analyzing it to help with your report. Could you describe what this image shows?",
-            sender: 'ai',
-            timestamp: new Date(),
-          };
-          setMessages(prev => [...prev, aiPhotoResponse]);
-          
-          // Save AI response to Firestore
-          await saveMessageToFirestore(aiPhotoResponse);
-        }, 1000);
+        // Update in Firestore
+        if (placeholderDocRef) {
+          await updateDoc(placeholderDocRef, finalMessageData);
+        }
+
       } catch (error) {
-        console.error('Error uploading photo:', error);
-        Alert.alert('Error', 'Failed to upload photo. Please try again.');
+        console.error('Full image processing pipeline failed:', error);
+        Alert.alert('Analysis Failed', error.message || 'Could not analyze the image. Please try again.');
+        // On failure, remove the optimistic message from UI and Firestore
+        setMessages(prev => prev.filter(msg => msg.id !== optimisticMessageId));
+        if (placeholderDocRef) {
+          await deleteDoc(placeholderDocRef);
+        }
+      } finally {
+        setIsAnalyzingImage(false);
       }
     }
   };
@@ -332,12 +568,12 @@ const ChatScreen = ({ navigation, route }) => {
         styles.messageBubble,
         item.sender === 'user' ? styles.userBubble : styles.aiBubble
       ]}>
-        <Text style={[
-          styles.messageText,
-          item.sender === 'user' ? styles.userText : styles.aiText
-        ]}>
+        <Markdown style={{ 
+            body: { color: item.sender === 'user' ? '#fff' : '#333' },
+            strong: { fontWeight: 'bold' } 
+          }}>
           {item.text}
-        </Text>
+        </Markdown>
         
         {item.images && (
           <View style={styles.imageContainer}>
@@ -345,7 +581,7 @@ const ChatScreen = ({ navigation, route }) => {
               <Image
                 key={index}
                 source={{ uri: image.uri }}
-                style={styles.messageImage}
+                style={[styles.messageImage, item.isOptimistic && { opacity: 0.6 }]}
                 resizeMode="cover"
               />
             ))}
@@ -382,7 +618,10 @@ const ChatScreen = ({ navigation, route }) => {
               data={reportTypes}
               keyExtractor={(item) => item}
               renderItem={({ item }) => (
-                <TouchableOpacity style={styles.reportTypeButton}>
+                <TouchableOpacity 
+                  style={styles.reportTypeButton}
+                  onPress={() => handleReportTypeSelection(item)}
+                >
                   <Text style={styles.reportTypeText}>{item}</Text>
                 </TouchableOpacity>
               )}
@@ -411,9 +650,11 @@ const ChatScreen = ({ navigation, route }) => {
         )}
 
         {/* Typing Indicator */}
-        {isTyping && (
+        {(isTyping || isAnalyzingImage) && (
           <View style={styles.typingContainer}>
-            <Text style={styles.typingText}>AI is typing...</Text>
+            <Text style={styles.typingText}>
+              {isAnalyzingImage ? 'Uploading and analyzing image...' : 'AI is typing...'}
+            </Text>
           </View>
         )}
 

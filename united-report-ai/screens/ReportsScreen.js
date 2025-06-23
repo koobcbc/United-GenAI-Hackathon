@@ -9,10 +9,11 @@ import {
   SafeAreaView,
   Alert,
   ActivityIndicator,
+  Dimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { db } from '../firebase';
-import { collection, getDocs, doc, updateDoc } from 'firebase/firestore';
+import { collection, onSnapshot, doc, updateDoc, query, where, orderBy, limit, getDocs, deleteDoc } from 'firebase/firestore';
 
 const ReportsScreen = ({ navigation, route }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -21,6 +22,7 @@ const ReportsScreen = ({ navigation, route }) => {
   const [isSortExpanded, setIsSortExpanded] = useState(false);
   const [reports, setReports] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [openMenuId, setOpenMenuId] = useState(null);
 
   // Check if a filter was passed from navigation
   useEffect(() => {
@@ -30,29 +32,105 @@ const ReportsScreen = ({ navigation, route }) => {
   }, [route.params?.filter]);
 
   useEffect(() => {
-    loadReportsFromFirestore();
+    // Set up real-time listener for reports
+    const reportsRef = collection(db, 'reports');
+    // Add a limit to reduce the amount of data being listened to
+    const reportsQuery = query(reportsRef, orderBy('created_at', 'desc'), limit(50));
+    
+    const unsubscribe = onSnapshot(reportsQuery, async (snapshot) => {
+      try {
+        const reportsData = [];
+        
+        // Process each report and fetch last message date
+        for (const doc of snapshot.docs) {
+          const data = doc.data();
+          const lastMessageDate = await getLastMessageDate(data.chat_id);
+          
+          reportsData.push({
+            id: doc.id,
+            ...data,
+            // Use last message date instead of report date
+            lastMessageDate: lastMessageDate,
+            // Keep original date as fallback
+            date: data.date ? 
+              (data.date.toDate ? 
+                data.date.toDate().toISOString().split('T')[0] : 
+                (typeof data.date === 'string' ? data.date : data.date.toString())
+              ) : 
+              'No date'
+          });
+        }
+        
+        // Sort by last message date in JavaScript (most recent first)
+        reportsData.sort((a, b) => {
+          // Handle yyyy-mm-dd string format
+          const dateA = new Date(a.lastMessageDate);
+          const dateB = new Date(b.lastMessageDate);
+          return dateB - dateA;
+        });
+        
+        setReports(reportsData);
+        setLoading(false);
+      } catch (error) {
+        console.error('Error processing reports data:', error);
+        Alert.alert('Error', 'Failed to load reports from database.');
+        setLoading(false);
+      }
+    }, (error) => {
+      console.error('Error listening to reports:', error);
+      Alert.alert('Error', 'Failed to load reports from database.');
+      setLoading(false);
+    });
+
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
   }, []);
 
-  const loadReportsFromFirestore = async () => {
+  // Function to get the last message date for a chat
+  const getLastMessageDate = async (chatId) => {
     try {
-      setLoading(true);
-      const reportsRef = collection(db, 'reports');
-      const snapshot = await getDocs(reportsRef);
+      if (!chatId) return 'No chat';
       
-      const reportsData = [];
-      snapshot.forEach(doc => {
-        reportsData.push({
-          id: doc.id,
-          ...doc.data()
-        });
-      });
+      const messagesRef = collection(db, 'report-messages');
+      const messagesQuery = query(
+        messagesRef, 
+        where('chat_id', '==', chatId),
+        orderBy('timestamp', 'desc'),
+        limit(1)
+      );
       
-      setReports(reportsData);
+      const snapshot = await getDocs(messagesQuery);
+      if (!snapshot.empty) {
+        const lastMessage = snapshot.docs[0].data();
+        const timestamp = lastMessage.timestamp;
+        
+        // Handle null or undefined timestamp
+        if (!timestamp) {
+          return 'No timestamp';
+        }
+        
+        // Handle Firestore Timestamp objects
+        if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+          return timestamp.toDate().toISOString().split('T')[0];
+        }
+        
+        // Handle Date objects
+        if (timestamp instanceof Date) {
+          return timestamp.toISOString().split('T')[0];
+        }
+        
+        // Handle string timestamps
+        if (typeof timestamp === 'string') {
+          return timestamp.split('T')[0];
+        }
+        
+        // Fallback
+        return 'Invalid timestamp';
+      }
+      return 'No messages';
     } catch (error) {
-      console.error('Error loading reports:', error);
-      Alert.alert('Error', 'Failed to load reports from database.');
-    } finally {
-      setLoading(false);
+      console.error('Error fetching last message date:', error);
+      return 'Error';
     }
   };
 
@@ -100,7 +178,43 @@ const ReportsScreen = ({ navigation, route }) => {
     );
   };
 
-  const filters = ['All', 'Completed', 'In Progress', 'Pending'];
+  const handleDeleteReport = async (reportId, chatId) => {
+    Alert.alert(
+      'Delete Report',
+      'This will also delete the associated chat and all messages. Continue?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Delete report
+              await deleteDoc(doc(db, 'reports', reportId));
+              // Delete chat
+              await deleteDoc(doc(db, 'report-chats', chatId));
+              // Delete messages
+              const messagesQuery = query(
+                collection(db, 'report-messages'),
+                where('chatId', '==', chatId)
+              );
+              const messagesSnapshot = await getDocs(messagesQuery);
+              const batchDeletes = [];
+              messagesSnapshot.forEach((msgDoc) => {
+                batchDeletes.push(deleteDoc(doc(db, 'report-messages', msgDoc.id)));
+              });
+              await Promise.all(batchDeletes);
+              setOpenMenuId(null);
+            } catch (error) {
+              Alert.alert('Delete Failed', 'An error occurred while deleting.');
+            }
+          },
+        },
+      ]
+    );
+  };
+
+  const filters = ['All', 'Completed', 'In Progress'];
 
   const sortOptions = ['Date Created', 'Last Message', 'Status', 'Priority', 'Title'];
 
@@ -109,12 +223,17 @@ const ReportsScreen = ({ navigation, route }) => {
     
     switch (selectedSort) {
       case 'Date Created':
-        return sortedReports.sort((a, b) => new Date(b.date) - new Date(a.date));
+        return sortedReports.sort((a, b) => {
+          // Handle yyyy-mm-dd string format
+          const dateA = new Date(a.lastMessageDate);
+          const dateB = new Date(b.lastMessageDate);
+          return dateB - dateA;
+        });
       
       case 'Last Message':
         return sortedReports.sort((a, b) => {
-          const aTime = a.lastMessageTime ? new Date(a.lastMessageTime) : new Date(0);
-          const bTime = b.lastMessageTime ? new Date(b.lastMessageTime) : new Date(0);
+          const aTime = a.lastMessageDate ? new Date(a.lastMessageDate) : new Date(0);
+          const bTime = b.lastMessageDate ? new Date(b.lastMessageDate) : new Date(0);
           return bTime - aTime;
         });
       
@@ -154,11 +273,11 @@ const ReportsScreen = ({ navigation, route }) => {
   const getPriorityColor = (priority) => {
     switch (priority) {
       case 'High':
-        return '#F44336';
+        return '#E91E63'; // Pink/Red
       case 'Medium':
-        return '#FF9800';
+        return '#9C27B0'; // Purple
       case 'Low':
-        return '#4CAF50';
+        return '#3F51B5'; // Indigo
       default:
         return '#757575';
     }
@@ -184,63 +303,74 @@ const ReportsScreen = ({ navigation, route }) => {
     return matchesSearch && matchesFilter;
   }));
 
-  const renderReport = ({ item }) => (
-    <TouchableOpacity 
-      style={styles.reportCard}
-      onPress={() => navigation.navigate('Chat', { report: item })}
-    >
-      <View style={styles.reportHeader}>
-        <View style={styles.reportIcon}>
-          <Ionicons name={getTypeIcon(item.type)} size={20} color="#007AFF" />
-        </View>
-        <View style={styles.reportInfo}>
-          <Text style={styles.reportTitle}>{item.title}</Text>
-          <Text style={styles.reportDescription} numberOfLines={2}>
-            {item.description}
-          </Text>
-          <View style={styles.reportMeta}>
-            <Text style={styles.reportType}>{item.type}</Text>
-            <Text style={styles.reportAgent}>• {item.agent}</Text>
+  const renderReport = ({ item }) => {
+    return (
+      <TouchableOpacity
+        style={styles.reportCard}
+        onPress={() => navigation.navigate('Chat', { report: item })}
+        activeOpacity={0.9}
+      >
+        <View style={styles.reportHeader}>
+          <View style={styles.reportIcon}>
+            <Ionicons name={getTypeIcon(item.type)} size={20} color="#007AFF" />
+          </View>
+          <View style={styles.reportInfo}>
+            <Text style={styles.reportTitle}>{item.title}</Text>
+            <Text style={styles.reportDescription} numberOfLines={2}>
+              {item.description}
+            </Text>
+            <View style={styles.reportMeta}>
+              <Text style={styles.reportType}>{item.type}</Text>
+            </View>
+          </View>
+          <View style={styles.reportStatus}>
+            <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) }]}> 
+              <Text style={styles.statusText}>{item.status}</Text>
+            </View>
+            <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(item.priority) }]}> 
+              <Text style={styles.priorityText}>{item.priority}</Text>
+            </View>
           </View>
         </View>
-        <View style={styles.reportStatus}>
-          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(item.status) }]}>
-            <Text style={styles.statusText}>{item.status}</Text>
-          </View>
-          <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(item.priority) }]}>
-            <Text style={styles.priorityText}>{item.priority}</Text>
-          </View>
-        </View>
-      </View>
-      <View style={styles.reportFooter}>
-        <Text style={styles.reportDate}>{item.date}</Text>
-        <View style={styles.actionsContainer}>
-          {item.status !== 'Completed' && (
+        <View style={styles.reportFooter}>
+          <Text style={styles.reportDate}>{item.lastMessageDate}</Text>
+          <View style={styles.actionsContainer}>
+            {item.status !== 'Completed' && (
+              <TouchableOpacity 
+                style={styles.submitButton} 
+                onPress={(e) => {
+                  e.stopPropagation();
+                  handleSubmitReport(item);
+                }}
+              >
+                <Ionicons name="paper-plane-outline" size={16} color="#fff" />
+                <Text style={styles.submitButtonText}>Submit</Text>
+              </TouchableOpacity>
+            )}
             <TouchableOpacity 
-              style={styles.submitButton} 
+              style={styles.viewButton} 
               onPress={(e) => {
-                e.stopPropagation(); // Prevent card click
-                handleSubmitReport(item);
+                e.stopPropagation();
+                handleViewReport(item);
               }}
             >
-              <Ionicons name="paper-plane-outline" size={16} color="#fff" />
-              <Text style={styles.submitButtonText}>Submit</Text>
+              <Ionicons name="eye-outline" size={18} color="#007AFF" />
+              <Text style={styles.viewButtonText}>View PDF</Text>
             </TouchableOpacity>
-          )}
-          <TouchableOpacity 
-            style={styles.viewButton} 
-            onPress={(e) => {
-              e.stopPropagation(); // Prevent card click
-              handleViewReport(item);
-            }}
-          >
-            <Ionicons name="eye-outline" size={18} color="#007AFF" />
-            <Text style={styles.viewButtonText}>View PDF</Text>
-          </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.viewButton, { backgroundColor: 'transparent', marginLeft: 6 }]}
+              onPress={(e) => {
+                e.stopPropagation();
+                handleDeleteReport(item.id, item.chat_id);
+              }}
+            >
+              <Ionicons name="trash-outline" size={20} color="#444" />
+            </TouchableOpacity>
+          </View>
         </View>
-      </View>
-    </TouchableOpacity>
-  );
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.container}>
@@ -529,11 +659,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#007AFF',
     fontWeight: '500',
-  },
-  reportAgent: {
-    fontSize: 12,
-    color: '#999',
-    marginLeft: 5,
   },
   reportStatus: {
     alignItems: 'flex-end',

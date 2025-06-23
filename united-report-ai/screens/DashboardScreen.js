@@ -10,11 +10,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { db } from '../firebase';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, onSnapshot, query, orderBy, limit } from 'firebase/firestore';
 
 const DashboardScreen = ({ navigation }) => {
-  const [recentReports, setRecentReports] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [recentReports, setRecentReports] = useState([]);
   const [stats, setStats] = useState({
     total: 0,
     completed: 0,
@@ -48,15 +48,35 @@ const DashboardScreen = ({ navigation }) => {
   };
 
   useEffect(() => {
-    // Fetch reports from Firestore
-    const fetchReports = async () => {
+    // Set up real-time listener for reports
+    const reportsRef = collection(db, 'reports');
+    // Add a limit to reduce the amount of data being listened to
+    const reportsQuery = query(reportsRef, orderBy('created_at', 'desc'), limit(20));
+    
+    const unsubscribe = onSnapshot(reportsQuery, (snapshot) => {
       try {
-        setLoading(true);
-        const reportsSnapshot = await getDocs(collection(db, 'reports'));
-        const reportsData = reportsSnapshot.docs.map((doc) => ({
-          id: doc.id,
-          ...doc.data(),
-        }));
+        const reportsData = snapshot.docs.map((doc) => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            ...data,
+            // Convert Firebase Timestamp to readable date string or use existing date string
+            date: data.date ? 
+              (data.date.toDate ? 
+                data.date.toDate().toISOString().split('T')[0] : 
+                (typeof data.date === 'string' ? data.date : data.date.toString())
+              ) : 
+              'No date'
+          };
+        });
+
+        // Sort by date in JavaScript (most recent first)
+        reportsData.sort((a, b) => {
+          // Handle yyyy-mm-dd string format
+          const dateA = new Date(a.date);
+          const dateB = new Date(b.date);
+          return dateB - dateA;
+        });
 
         // Calculate stats
         const total = reportsData.length;
@@ -68,14 +88,19 @@ const DashboardScreen = ({ navigation }) => {
         // Get recent reports (last 3)
         const recent = reportsData.slice(0, 3);
         setRecentReports(recent);
+        
+        setLoading(false);
       } catch (error) {
-        console.error('Error fetching reports:', error);
-      } finally {
+        console.error('Error processing reports data:', error);
         setLoading(false);
       }
-    };
+    }, (error) => {
+      console.error('Error listening to reports:', error);
+      setLoading(false);
+    });
 
-    fetchReports();
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
   }, []);
 
   return (
