@@ -4,7 +4,7 @@ A comprehensive React Native mobile application for creating and managing AI-pow
 
 ## Features
 
-### 🏠 Dashboard
+### Dashboard
 - **Overview Statistics**: View total reports, completed reports, and in-progress reports
 - **Quick Actions**: Create new reports with a single tap
 - **Recent Reports**: Browse recently created reports with status indicators
@@ -17,7 +17,7 @@ A comprehensive React Native mobile application for creating and managing AI-pow
 - **Real-time Responses**: AI agents provide contextual responses and guidance
 - **Haptic Feedback**: Enhanced user experience with tactile responses
 
-### 📋 Reports Management
+### Reports Management
 - **Comprehensive List**: View all generated reports with detailed information
 - **Search & Filter**: Find reports by title, description, or status
 - **Status Tracking**: Monitor report progress (Pending, In Progress, Completed)
