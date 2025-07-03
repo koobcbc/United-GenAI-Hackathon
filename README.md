@@ -10,7 +10,7 @@ A comprehensive React Native mobile application for creating and managing AI-pow
 - **Recent Reports**: Browse recently created reports with status indicators
 - **Modern UI**: Clean, intuitive interface with United Airlines branding
 
-### 💬 AI Chat Interface
+### AI Chat Interface
 - **Intelligent Conversations**: Interact with AI agents for report creation
 - **Image Upload**: Upload photos from gallery or take new photos with camera
 - **Report Type Selection**: Choose from predefined report categories
